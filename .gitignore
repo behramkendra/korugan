@@ -1,0 +1,43 @@
+# --- secrets / local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Go ---
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+vendor/
+
+# --- Node / Next.js ---
+node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
+npm-debug.log*
+yarn-error.log*
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- internal docs (not published) ---
+.internal-docs/
+
+# --- local tooling ---
+.claude/settings.local.json
+*.local.md
+tmp/
