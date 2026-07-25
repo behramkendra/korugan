@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: korugan
+          POSTGRES_PASSWORD: korugan-ci
+          POSTGRES_DB: korugan_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U korugan"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Format check
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Vet
+        run: go vet ./...
+      - name: Tests (unit + store integration)
+        env:
+          DATABASE_URL_TEST: postgres://korugan:korugan-ci@127.0.0.1:5432/korugan_test?sslmode=disable
+        run: go test ./...
+      - name: Build
+        run: go build ./cmd/korugan
