@@ -34,9 +34,6 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
-# --- internal docs (not published) ---
-.internal-docs/
-
 # --- local tooling ---
 .claude/settings.local.json
 *.local.md

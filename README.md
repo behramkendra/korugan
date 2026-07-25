@@ -101,15 +101,44 @@ One Go interface + a conformance test suite per provider. The abstraction is the
 
 ## 🚧 Status
 
-Pre-alpha, building in the open. Current focus — **Cloudflare read-only MVP**:
+Pre-alpha, building in the open. The backend core is real and tested; the web UI is next.
 
 - [x] Architecture & connector contract designed
-- [ ] Event ingestion + normalization (Cloudflare)
-- [ ] Rule-based detections (cert expiry, error spikes, traffic anomalies)
-- [ ] BYOK AI chat over your own events
-- [ ] Web UI
+- [x] Cloudflare connector — zones, DNS, firewall events (fixture-tested)
+- [x] Event ingestion, normalization, dedup, cursor-based sync
+- [x] Rule-based detections (blocked-traffic spikes, config drift)
+- [x] BYOK AI engine — OpenRouter / OpenAI / DeepSeek / Anthropic / Ollama, zero-key mode, budgets
+- [x] Recommend → approve → apply → verify → rollback pipeline (WAF rules, cache purge)
+- [x] REST API + CI (unit + Postgres integration, green)
+- [ ] Web UI (Next.js)
+- [ ] Live multi-provider expansion
 
 ⭐ **Star the repo** to follow along — the interesting parts are just starting.
+
+## 🚀 Quickstart
+
+```bash
+git clone https://github.com/behramkendra/korugan.git
+cd korugan
+cp .env.example .env          # set DATABASE_URL; add a Cloudflare token + LLM key when ready
+docker compose up -d db       # or point DATABASE_URL at any Postgres 16+
+make run
+```
+
+Migrations apply automatically on boot. With no LLM key set, Korugan runs in **zero-key mode** — full collector, dashboard and rule-based findings, AI off until you add a key. See [.env.example](./.env.example).
+
+## 📚 Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/VISION.md](./docs/VISION.md) | The problem, the thesis, what Korugan is and is not |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Components, module layout, phased infrastructure, autonomy gates, decision log |
+| [docs/CONNECTORS.md](./docs/CONNECTORS.md) | Connector interface, event/action schemas, Cloudflare mapping |
+| [docs/AI_ENGINE.md](./docs/AI_ENGINE.md) | BYOK design, agent loop, guardrails, cost controls |
+| [docs/DATABASE.md](./docs/DATABASE.md) | Schema, indexing, scaling plan |
+| [docs/API.md](./docs/API.md) | HTTP endpoints |
+| [ROADMAP.md](./ROADMAP.md) | Milestones P0–P5 with done-criteria |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Dev setup, style, commit conventions |
 
 ## 📄 License
 
