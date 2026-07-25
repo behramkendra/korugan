@@ -1,0 +1,148 @@
+// Command korugan runs the whole platform: migrations, connector sync
+// loop, analyzers and the HTTP API — one binary, PostgreSQL as the only
+// dependency.
+package main
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/behramkendra/korugan/internal/ai"
+	aiprovider "github.com/behramkendra/korugan/internal/ai/provider"
+	"github.com/behramkendra/korugan/internal/analysis"
+	"github.com/behramkendra/korugan/internal/config"
+	"github.com/behramkendra/korugan/internal/connector"
+	_ "github.com/behramkendra/korugan/internal/connector/cloudflare" // register adapter
+	"github.com/behramkendra/korugan/internal/domain"
+	"github.com/behramkendra/korugan/internal/httpapi"
+	"github.com/behramkendra/korugan/internal/ingest"
+	"github.com/behramkendra/korugan/internal/obs"
+	"github.com/behramkendra/korugan/internal/store"
+)
+
+func main() {
+	cfg, err := config.Load()
+	log := obs.NewLogger(cfg.LogLevel)
+	if err != nil {
+		log.Error("config", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	st, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Error("store open", "err", err)
+		os.Exit(1)
+	}
+	defer st.Close()
+	log.Info("store ready, migrations applied")
+
+	// Connectors: v0.1 reads the Cloudflare token from the environment.
+	// The settings UI + sealed storage take over in a later increment.
+	var conns []connector.Connector
+	if tok := os.Getenv("CLOUDFLARE_API_TOKEN"); tok != "" {
+		c, err := connector.New(domain.ProviderCloudflare, map[string]string{"api_token": tok})
+		if err != nil {
+			log.Error("cloudflare connector", "err", err)
+			os.Exit(1)
+		}
+		if err := c.Validate(ctx); err != nil {
+			log.Error("cloudflare token invalid", "err", err)
+			os.Exit(1)
+		}
+		conns = append(conns, c)
+		log.Info("cloudflare connector validated")
+	} else {
+		log.Warn("CLOUDFLARE_API_TOKEN not set — running without connectors")
+	}
+
+	engine := buildEngine(st, log)
+	if engine.Enabled() {
+		log.Info("ai engine enabled")
+	} else {
+		log.Info("zero-key mode: AI features off until an LLM key is configured")
+	}
+
+	if len(conns) > 0 {
+		poller := &ingest.Poller{
+			Store: st, Log: log, Interval: cfg.PollInterval,
+			Analysis:   &analysis.Runner{Store: st, Log: log},
+			Connectors: conns,
+		}
+		go poller.Run(ctx)
+	}
+
+	api := &httpapi.Server{Store: st, Engine: engine, Log: log, APIToken: os.Getenv("KORUGAN_API_TOKEN")}
+	srv := &http.Server{Addr: cfg.Addr, Handler: api.Router(), ReadHeaderTimeout: 10 * time.Second}
+
+	go func() {
+		<-ctx.Done()
+		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shCtx)
+	}()
+
+	log.Info("korugan listening", "addr", cfg.Addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Error("http server", "err", err)
+		os.Exit(1)
+	}
+	log.Info("shutdown complete")
+}
+
+// buildEngine maps KORUGAN_LLM_* env vars onto tier assignments.
+// KORUGAN_LLM_PROVIDER: openrouter|openai|deepseek|ollama|anthropic
+// KORUGAN_LLM_MODEL:    model id used for every tier (v0.1 single-model)
+// KORUGAN_LLM_API_KEY:  the user's own key (BYOK)
+// KORUGAN_LLM_BASE_URL: optional override (self-hosted gateways)
+func buildEngine(st *store.Store, log interface{ Warn(string, ...any) }) *ai.Engine {
+	name := os.Getenv("KORUGAN_LLM_PROVIDER")
+	if name == "" {
+		return ai.NewEngine(nil, st)
+	}
+	model := os.Getenv("KORUGAN_LLM_MODEL")
+	key := os.Getenv("KORUGAN_LLM_API_KEY")
+	base := os.Getenv("KORUGAN_LLM_BASE_URL")
+
+	kind := aiprovider.KindOpenAICompatible
+	switch name {
+	case "anthropic":
+		kind = aiprovider.KindAnthropic
+	case "openrouter":
+		if base == "" {
+			base = "https://openrouter.ai/api/v1"
+		}
+	case "deepseek":
+		if base == "" {
+			base = "https://api.deepseek.com/v1"
+		}
+	case "ollama":
+		if base == "" {
+			base = "http://127.0.0.1:11434/v1"
+		}
+	case "openai":
+		// default base
+	default:
+		log.Warn("unknown KORUGAN_LLM_PROVIDER; expected openrouter|openai|deepseek|ollama|anthropic", "got", name)
+	}
+	if model == "" || (key == "" && name != "ollama") {
+		log.Warn("incomplete LLM config: KORUGAN_LLM_MODEL and KORUGAN_LLM_API_KEY required (key optional for ollama)")
+		return ai.NewEngine(nil, st)
+	}
+	p, err := aiprovider.New(aiprovider.Config{Kind: kind, Name: name, BaseURL: base, APIKey: key})
+	if err != nil {
+		log.Warn("llm provider init failed", "err", err)
+		return ai.NewEngine(nil, st)
+	}
+	a := ai.Assignment{Provider: p, Model: model}
+	return ai.NewEngine(map[ai.Tier]ai.Assignment{
+		ai.TierFast: a, ai.TierBalanced: a, ai.TierDeep: a,
+	}, st)
+}
