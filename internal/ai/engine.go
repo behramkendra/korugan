@@ -37,10 +37,13 @@ var tierOf = map[TaskClass]Tier{
 	TaskPlanRemediation: TierDeep,
 }
 
-// Assignment binds a tier to one provider+model choice.
+// Assignment binds a tier to one provider+model choice, with an optional
+// price table (USD per 1k tokens) that feeds cost accounting and budgets.
 type Assignment struct {
-	Provider provider.LLMProvider
-	Model    string
+	Provider      provider.LLMProvider
+	Model         string
+	PriceInPer1K  float64
+	PriceOutPer1K float64
 }
 
 // UsageRecorder decouples accounting from the store for tests.
@@ -49,8 +52,10 @@ type UsageRecorder interface {
 }
 
 type Engine struct {
-	tiers map[Tier]Assignment
-	usage UsageRecorder
+	tiers  map[Tier]Assignment
+	usage  UsageRecorder
+	budget Budget
+	spend  SpendReporter
 }
 
 // NewEngine wires tier assignments. Missing tiers fall back to any
@@ -102,6 +107,9 @@ func (e *Engine) Chat(ctx context.Context, tc TaskClass, userMsg string, ground 
 	if err != nil {
 		return "", err
 	}
+	if err := e.checkBudget(ctx, tc); err != nil {
+		return "", err
+	}
 	var sb strings.Builder
 	for _, g := range ground {
 		fmt.Fprintf(&sb, "%s:\n<<<UNTRUSTED_EDGE_DATA\n%s\nUNTRUSTED_EDGE_DATA>>>\n\n", g.Label, g.JSON)
@@ -121,7 +129,7 @@ func (e *Engine) Chat(ctx context.Context, tc TaskClass, userMsg string, ground 
 	}
 	if e.usage != nil {
 		_ = e.usage.RecordLLMUsage(ctx, a.Provider.Name(), a.Model, string(tc),
-			comp.Usage.TokensIn, comp.Usage.TokensOut, 0)
+			comp.Usage.TokensIn, comp.Usage.TokensOut, estCost(a, comp.Usage.TokensIn, comp.Usage.TokensOut))
 	}
 	return comp.Text, nil
 }
