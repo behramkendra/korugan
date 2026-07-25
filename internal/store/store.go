@@ -145,8 +145,8 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]domain.Event, 
 	if f.Limit <= 0 || f.Limit > 1000 {
 		f.Limit = 200
 	}
-	q := `SELECT id, provider, provider_event_id, category, severity, ts,
-			actor, target, rule, fields,
+	q := `SELECT e.id, e.provider_event_id, e.category, e.severity, e.ts,
+			e.actor, e.target, e.rule, e.fields,
 			r.provider, r.kind, r.external_id, r.name
 		FROM events e JOIN resources r ON r.id = e.resource_id WHERE 1=1`
 	args := []any{}
@@ -181,7 +181,7 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) ([]domain.Event, 
 	for rows.Next() {
 		var e domain.Event
 		var actor, target, rule, fields []byte
-		if err := rows.Scan(&e.ID, (*string)(&e.Resource.Provider), &e.ProviderEventID,
+		if err := rows.Scan(&e.ID, &e.ProviderEventID,
 			(*string)(&e.Category), (*string)(&e.Severity), &e.TS,
 			&actor, &target, &rule, &fields,
 			(*string)(&e.Resource.Provider), &e.Resource.Kind, &e.Resource.ExternalID, &e.Resource.Name); err != nil {
@@ -225,6 +225,10 @@ func (s *Store) CountEventsByCategory(ctx context.Context, resourceID string, si
 func (s *Store) UpsertOpenFinding(ctx context.Context, resourceID string, f domain.Finding) (string, error) {
 	if err := f.Validate(); err != nil {
 		return "", err
+	}
+	// A nil slice would send SQL NULL; the column is NOT NULL DEFAULT '{}'.
+	if f.Evidence == nil {
+		f.Evidence = []string{}
 	}
 	id := NewID()
 	err := s.Pool.QueryRow(ctx, `
@@ -281,6 +285,167 @@ type FindingRow struct {
 	UpdatedAt time.Time           `json:"updated_at"`
 }
 
+// --- recommendations ---
+
+func (s *Store) InsertRecommendation(ctx context.Context, r domain.Recommendation) (string, error) {
+	if err := r.Validate(); err != nil {
+		return "", err
+	}
+	id := NewID()
+	params, _ := json.Marshal(r.Params)
+	before, _ := json.Marshal(r.DiffBefore)
+	after, _ := json.Marshal(r.DiffAfter)
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO recommendations (id, finding_id, action_type, params, diff_before, diff_after, rationale, rollback_plan, confidence)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		id, r.FindingID, r.ActionType, params, before, after, r.Rationale, r.Rollback, r.Confidence)
+	return id, err
+}
+
+func (s *Store) GetRecommendation(ctx context.Context, id string) (*RecommendationRow, error) {
+	var rr RecommendationRow
+	var params, before, after []byte
+	err := s.Pool.QueryRow(ctx, `
+		SELECT rec.id, rec.finding_id, rec.action_type, rec.params, rec.diff_before, rec.diff_after,
+			rec.rationale, rec.rollback_plan, rec.confidence, rec.created_at,
+			r.provider, r.kind, r.external_id, r.name
+		FROM recommendations rec
+		JOIN findings f ON f.id = rec.finding_id
+		JOIN resources r ON r.id = f.resource_id
+		WHERE rec.id = $1`, id).Scan(
+		&rr.ID, &rr.FindingID, (*string)(&rr.ActionType), &params, &before, &after,
+		&rr.Rationale, &rr.Rollback, &rr.Confidence, &rr.CreatedAt,
+		(*string)(&rr.Resource.Provider), &rr.Resource.Kind, &rr.Resource.ExternalID, &rr.Resource.Name)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(params, &rr.Params)
+	rr.DiffBefore = before
+	rr.DiffAfter = after
+	return &rr, nil
+}
+
+func (s *Store) ListRecommendations(ctx context.Context, limit int) ([]RecommendationRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.Pool.Query(ctx, `
+		SELECT rec.id, rec.finding_id, rec.action_type, rec.params, rec.rationale,
+			rec.rollback_plan, rec.confidence, rec.created_at,
+			r.provider, r.kind, r.external_id, r.name
+		FROM recommendations rec
+		JOIN findings f ON f.id = rec.finding_id
+		JOIN resources r ON r.id = f.resource_id
+		ORDER BY rec.created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RecommendationRow
+	for rows.Next() {
+		var rr RecommendationRow
+		var params []byte
+		if err := rows.Scan(&rr.ID, &rr.FindingID, (*string)(&rr.ActionType), &params, &rr.Rationale,
+			&rr.Rollback, &rr.Confidence, &rr.CreatedAt,
+			(*string)(&rr.Resource.Provider), &rr.Resource.Kind, &rr.Resource.ExternalID, &rr.Resource.Name); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(params, &rr.Params)
+		out = append(out, rr)
+	}
+	return out, rows.Err()
+}
+
+type RecommendationRow struct {
+	ID         string             `json:"id"`
+	FindingID  string             `json:"finding_id"`
+	Resource   domain.ResourceRef `json:"resource"`
+	ActionType domain.ActionType  `json:"action_type"`
+	Params     map[string]any     `json:"params"`
+	DiffBefore json.RawMessage    `json:"diff_before,omitempty"`
+	DiffAfter  json.RawMessage    `json:"diff_after,omitempty"`
+	Rationale  string             `json:"rationale"`
+	Rollback   string             `json:"rollback_plan"`
+	Confidence float64            `json:"confidence"`
+	CreatedAt  time.Time          `json:"created_at"`
+}
+
+// --- actions ---
+
+// InsertAction persists a new action. resourceID is the internal ULID.
+func (s *Store) InsertAction(ctx context.Context, resourceID string, a domain.Action) error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	params, _ := json.Marshal(a.Params)
+	var recID any
+	if a.RecommendationID != "" {
+		recID = a.RecommendationID
+	}
+	var approver any
+	if a.ApprovedBy != "" {
+		approver = a.ApprovedBy
+	}
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO actions (id, type, resource_id, params, state, recommendation_id, approved_by, idempotency_key, autonomy_level)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		a.ID, a.Type, resourceID, params, a.State, recID, approver, a.IdempotencyKey, int(a.AutonomyLevel))
+	return err
+}
+
+func (s *Store) SetActionState(ctx context.Context, id string, state domain.ActionState, result any) error {
+	var res any
+	if result != nil {
+		b, _ := json.Marshal(result)
+		res = b
+	}
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE actions SET state=$2, result=COALESCE($3, result), updated_at=now() WHERE id=$1`,
+		id, state, res)
+	return err
+}
+
+func (s *Store) GetAction(ctx context.Context, id string) (*ActionRow, error) {
+	var ar ActionRow
+	var params, result []byte
+	err := s.Pool.QueryRow(ctx, `
+		SELECT a.id, a.type, a.state, a.params, a.recommendation_id, a.approved_by,
+			a.idempotency_key, a.autonomy_level, a.result, a.created_at, a.updated_at,
+			r.provider, r.kind, r.external_id, r.name
+		FROM actions a JOIN resources r ON r.id = a.resource_id
+		WHERE a.id = $1`, id).Scan(
+		&ar.ID, (*string)(&ar.Type), (*string)(&ar.State), &params, &ar.RecommendationID, &ar.ApprovedBy,
+		&ar.IdempotencyKey, &ar.AutonomyLevel, &result, &ar.CreatedAt, &ar.UpdatedAt,
+		(*string)(&ar.Resource.Provider), &ar.Resource.Kind, &ar.Resource.ExternalID, &ar.Resource.Name)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(params, &ar.Params)
+	ar.Result = result
+	return &ar, nil
+}
+
+type ActionRow struct {
+	ID               string             `json:"id"`
+	Resource         domain.ResourceRef `json:"resource"`
+	Type             domain.ActionType  `json:"type"`
+	State            domain.ActionState `json:"state"`
+	Params           map[string]any     `json:"params"`
+	RecommendationID *string            `json:"recommendation_id,omitempty"`
+	ApprovedBy       *string            `json:"approved_by,omitempty"`
+	IdempotencyKey   string             `json:"idempotency_key"`
+	AutonomyLevel    int                `json:"autonomy_level"`
+	Result           json.RawMessage    `json:"result,omitempty"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+}
+
 // --- cursors ---
 
 func (s *Store) GetCursor(ctx context.Context, provider domain.Provider, resourceExternalID, stream string) (string, error) {
@@ -331,6 +496,14 @@ func (s *Store) RecordLLMUsage(ctx context.Context, provider, model, taskClass s
 		INSERT INTO llm_usage (provider, model, task_class, tokens_in, tokens_out, est_cost_usd)
 		VALUES ($1,$2,$3,$4,$5,$6)`, provider, model, taskClass, tokensIn, tokensOut, estCostUSD)
 	return err
+}
+
+// SpendSince returns total estimated LLM cost (USD) recorded since t.
+func (s *Store) SpendSince(ctx context.Context, since time.Time) (float64, error) {
+	var total float64
+	err := s.Pool.QueryRow(ctx,
+		`SELECT COALESCE(SUM(est_cost_usd),0) FROM llm_usage WHERE ts >= $1`, since).Scan(&total)
+	return total, err
 }
 
 // --- audit ---
