@@ -55,6 +55,19 @@ export type Recommendation = {
   created_at: string;
 };
 
+export type SettingsStatus = {
+  sealed_storage: boolean;
+  cloudflare?: { configured: boolean; hint?: string };
+  llm?: { configured: boolean; provider?: string; model?: string; key_hint?: string };
+};
+
+export type LLMInput = {
+  provider: string;
+  model: string;
+  base_url?: string;
+  api_key?: string;
+};
+
 export type ActionRow = {
   id: string;
   resource: ResourceRef;
@@ -125,6 +138,17 @@ export const api = {
     req<{ answer: string; grounded_events: number }>("/api/v1/chat", {
       method: "POST",
       body: JSON.stringify({ message, resource_id }),
+    }),
+  settings: () => req<SettingsStatus>("/api/v1/settings"),
+  setCloudflare: (token: string, actor = "operator") =>
+    req<{ status: string; applies: string }>("/api/v1/settings/cloudflare", {
+      method: "PUT",
+      body: JSON.stringify({ actor, token }),
+    }),
+  setLLM: (cfg: LLMInput, actor = "operator") =>
+    req<{ status: string; applies: string }>("/api/v1/settings/llm", {
+      method: "PUT",
+      body: JSON.stringify({ actor, ...cfg }),
     }),
 };
 

@@ -9,6 +9,7 @@ import {
   Lightbulb,
   ChatCircleText,
   ShieldCheck,
+  Gear,
 } from "@phosphor-icons/react";
 
 const nav = [
@@ -17,6 +18,7 @@ const nav = [
   { href: "/findings", label: "Findings", icon: Warning },
   { href: "/recommendations", label: "Recommendations", icon: Lightbulb },
   { href: "/chat", label: "Chat", icon: ChatCircleText },
+  { href: "/settings", label: "Settings", icon: Gear },
 ];
 
 export function Sidebar() {
