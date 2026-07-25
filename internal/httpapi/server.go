@@ -18,14 +18,16 @@ import (
 	"github.com/behramkendra/korugan/internal/action"
 	"github.com/behramkendra/korugan/internal/ai"
 	"github.com/behramkendra/korugan/internal/ai/provider"
+	"github.com/behramkendra/korugan/internal/settings"
 	"github.com/behramkendra/korugan/internal/store"
 )
 
 type Server struct {
-	Store   *store.Store
-	Engine  *ai.Engine
-	Actions *action.Service
-	Log     *slog.Logger
+	Store    *store.Store
+	Engine   *ai.Engine
+	Actions  *action.Service
+	Settings *settings.Service
+	Log      *slog.Logger
 	// APIToken, when set, gates every /api route (Authorization: Bearer).
 	// Empty means open — acceptable only for localhost development.
 	APIToken string
@@ -52,6 +54,9 @@ func (s *Server) Router() http.Handler {
 		r.Post("/recommendations/{id}/reject", s.handleReject)
 		r.Get("/actions/{id}", s.handleAction)
 		r.Post("/actions/{id}/rollback", s.handleRollback)
+		r.Get("/settings", s.handleSettings)
+		r.Put("/settings/cloudflare", s.handleSetCloudflare)
+		r.Put("/settings/llm", s.handleSetLLM)
 	})
 	return r
 }
@@ -242,6 +247,74 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "rolled_back"})
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if s.Settings == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"sealed_storage": false})
+		return
+	}
+	st, err := s.Settings.Status(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) settingsGuard(w http.ResponseWriter) bool {
+	if s.Settings == nil || !s.Settings.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "sealed settings disabled: set KORUGAN_MASTER_KEY on the server",
+		})
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleSetCloudflare(w http.ResponseWriter, r *http.Request) {
+	if !s.settingsGuard(w) {
+		return
+	}
+	var body struct {
+		Actor string `json:"actor"`
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&body)
+	if err := s.Settings.SetCloudflareToken(r.Context(), orDefault(body.Actor, "operator"), body.Token); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	// Note: the running sync loop picks up new connector credentials on the
+	// next restart; runtime hot-reload is a documented follow-up.
+	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "applies": "on next restart"})
+}
+
+func (s *Server) handleSetLLM(w http.ResponseWriter, r *http.Request) {
+	if !s.settingsGuard(w) {
+		return
+	}
+	var body struct {
+		Actor    string `json:"actor"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		BaseURL  string `json:"base_url"`
+		APIKey   string `json:"api_key"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&body)
+	cfg := settings.LLMConfig{Provider: body.Provider, Model: body.Model, BaseURL: body.BaseURL, APIKey: body.APIKey}
+	if err := s.Settings.SetLLM(r.Context(), orDefault(body.Actor, "operator"), cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "applies": "on next restart"})
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 func decodeActor(r *http.Request) actorRequest {

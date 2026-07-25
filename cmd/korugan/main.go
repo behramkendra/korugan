@@ -20,10 +20,12 @@ import (
 	"github.com/behramkendra/korugan/internal/config"
 	"github.com/behramkendra/korugan/internal/connector"
 	_ "github.com/behramkendra/korugan/internal/connector/cloudflare" // register adapter
+	"github.com/behramkendra/korugan/internal/crypto"
 	"github.com/behramkendra/korugan/internal/domain"
 	"github.com/behramkendra/korugan/internal/httpapi"
 	"github.com/behramkendra/korugan/internal/ingest"
 	"github.com/behramkendra/korugan/internal/obs"
+	"github.com/behramkendra/korugan/internal/settings"
 	"github.com/behramkendra/korugan/internal/store"
 )
 
@@ -46,10 +48,33 @@ func main() {
 	defer st.Close()
 	log.Info("store ready, migrations applied")
 
-	// Connectors: v0.1 reads the Cloudflare token from the environment.
-	// The settings UI + sealed storage take over in a later increment.
+	// Sealed settings: enabled when a master key is present. Stored
+	// credentials take precedence over environment variables.
+	var sealer *crypto.Sealer
+	if mk := cfg.MasterKeyB64; mk != "" {
+		sealer, err = crypto.NewSealer(mk)
+		if err != nil {
+			log.Error("master key invalid", "err", err)
+			os.Exit(1)
+		}
+		log.Info("sealed credential storage enabled")
+	} else {
+		log.Warn("KORUGAN_MASTER_KEY not set — sealed settings disabled; credentials come from environment only")
+	}
+	settingsSvc := settings.New(st, sealer)
+
+	// Connectors: prefer a sealed Cloudflare token, fall back to the env var.
+	cfToken := os.Getenv("CLOUDFLARE_API_TOKEN")
+	if settingsSvc.Enabled() {
+		if stored, err := settingsSvc.CloudflareToken(ctx); err != nil {
+			log.Warn("could not read stored cloudflare token", "err", err)
+		} else if stored != "" {
+			cfToken = stored
+			log.Info("using stored Cloudflare token from sealed settings")
+		}
+	}
 	var conns []connector.Connector
-	if tok := os.Getenv("CLOUDFLARE_API_TOKEN"); tok != "" {
+	if tok := cfToken; tok != "" {
 		c, err := connector.New(domain.ProviderCloudflare, map[string]string{"api_token": tok})
 		if err != nil {
 			log.Error("cloudflare connector", "err", err)
@@ -65,7 +90,7 @@ func main() {
 		log.Warn("CLOUDFLARE_API_TOKEN not set — running without connectors")
 	}
 
-	engine := buildEngine(st, log)
+	engine := buildEngine(ctx, st, settingsSvc, log)
 	if engine.Enabled() {
 		log.Info("ai engine enabled")
 	} else {
@@ -95,7 +120,7 @@ func main() {
 		go poller.Run(ctx)
 	}
 
-	api := &httpapi.Server{Store: st, Engine: engine, Actions: actionsvc, Log: log, APIToken: os.Getenv("KORUGAN_API_TOKEN")}
+	api := &httpapi.Server{Store: st, Engine: engine, Actions: actionsvc, Settings: settingsSvc, Log: log, APIToken: os.Getenv("KORUGAN_API_TOKEN")}
 	srv := &http.Server{Addr: cfg.Addr, Handler: api.Router(), ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
@@ -118,14 +143,21 @@ func main() {
 // KORUGAN_LLM_MODEL:    model id used for every tier (v0.1 single-model)
 // KORUGAN_LLM_API_KEY:  the user's own key (BYOK)
 // KORUGAN_LLM_BASE_URL: optional override (self-hosted gateways)
-func buildEngine(st *store.Store, log interface{ Warn(string, ...any) }) *ai.Engine {
+func buildEngine(ctx context.Context, st *store.Store, settingsSvc *settings.Service, log interface{ Warn(string, ...any) }) *ai.Engine {
 	name := os.Getenv("KORUGAN_LLM_PROVIDER")
-	if name == "" {
-		return ai.NewEngine(nil, st)
-	}
 	model := os.Getenv("KORUGAN_LLM_MODEL")
 	key := os.Getenv("KORUGAN_LLM_API_KEY")
 	base := os.Getenv("KORUGAN_LLM_BASE_URL")
+
+	// Stored (sealed) LLM config takes precedence over environment.
+	if settingsSvc.Enabled() {
+		if cfg, err := settingsSvc.LLM(ctx); err == nil && cfg != nil {
+			name, model, key, base = cfg.Provider, cfg.Model, cfg.APIKey, cfg.BaseURL
+		}
+	}
+	if name == "" {
+		return ai.NewEngine(nil, st)
+	}
 
 	kind := aiprovider.KindOpenAICompatible
 	switch name {
