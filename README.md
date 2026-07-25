@@ -110,7 +110,7 @@ Pre-alpha, building in the open. The backend core is real and tested; the web UI
 - [x] BYOK AI engine — OpenRouter / OpenAI / DeepSeek / Anthropic / Ollama, zero-key mode, budgets
 - [x] Recommend → approve → apply → verify → rollback pipeline (WAF rules, cache purge)
 - [x] REST API + CI (unit + Postgres integration, green)
-- [ ] Web UI (Next.js)
+- [x] Web console (Next.js) — dashboard, event explorer, findings, approvals, chat
 - [ ] Live multi-provider expansion
 
 ⭐ **Star the repo** to follow along — the interesting parts are just starting.
@@ -126,6 +126,14 @@ make run
 ```
 
 Migrations apply automatically on boot. With no LLM key set, Korugan runs in **zero-key mode** — full collector, dashboard and rule-based findings, AI off until you add a key. See [.env.example](./.env.example).
+
+The web console lives in [`web/`](./web):
+
+```bash
+cd web
+cp .env.example .env.local     # point NEXT_PUBLIC_API_BASE at the backend
+npm install && npm run dev     # http://localhost:3000
+```
 
 ## 📚 Documentation
 
