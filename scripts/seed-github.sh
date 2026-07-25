@@ -11,6 +11,18 @@ set -euo pipefail
 REPO="${REPO:-behramkendra/korugan}"
 echo "Seeding $REPO ..."
 
+# --- labels (issues below reference these; gh errors on unknown labels) ---
+create_label() {
+  gh label create "$1" --repo "$REPO" --color "$2" --description "$3" >/dev/null 2>&1 \
+    && echo "label: $1" || echo "label exists/skip: $1"
+}
+create_label connector     1d76db "Provider connector work"
+create_label ai-engine     8250df "BYOK AI engine"
+create_label frontend      0e8a16 "Next.js web UI"
+create_label security      b60205 "Security / credential handling"
+create_label observability fbca04 "Telemetry, metrics, tracing"
+create_label design-review 5319e7 "Design feedback wanted"
+
 # --- milestones (P1..P5 mirror ROADMAP.md) ---
 create_ms() {
   gh api "repos/$REPO/milestones" -f title="$1" -f description="$2" >/dev/null 2>&1 \
