@@ -110,7 +110,8 @@ Pre-alpha, building in the open. The backend core is real and tested; the web UI
 - [x] BYOK AI engine — OpenRouter / OpenAI / DeepSeek / Anthropic / Ollama, zero-key mode, budgets
 - [x] Recommend → approve → apply → verify → rollback pipeline (WAF rules, cache purge)
 - [x] REST API + CI (unit + Postgres integration, green)
-- [x] Web console (Next.js) — dashboard, event explorer, findings, approvals, chat
+- [x] Web console (Next.js) — dashboard, event explorer, findings, approvals, chat, settings
+- [x] Sealed credential storage (AES-256-GCM) — configure Cloudflare + LLM keys at runtime
 - [ ] Live multi-provider expansion
 
 ⭐ **Star the repo** to follow along — the interesting parts are just starting.
