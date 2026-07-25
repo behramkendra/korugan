@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/behramkendra/korugan/internal/action"
 	"github.com/behramkendra/korugan/internal/ai"
 	aiprovider "github.com/behramkendra/korugan/internal/ai/provider"
 	"github.com/behramkendra/korugan/internal/analysis"
@@ -70,6 +72,20 @@ func main() {
 		log.Info("zero-key mode: AI features off until an LLM key is configured")
 	}
 
+	// Action service: resolve the writable connector per provider from the
+	// connectors constructed above.
+	actionsvc := &action.Service{
+		Store: st, Log: log,
+		Resolve: func(p domain.Provider) (connector.WriteConnector, bool) {
+			for _, c := range conns {
+				if c.Info().Provider == p {
+					return connector.AsWriter(c)
+				}
+			}
+			return nil, false
+		},
+	}
+
 	if len(conns) > 0 {
 		poller := &ingest.Poller{
 			Store: st, Log: log, Interval: cfg.PollInterval,
@@ -79,7 +95,7 @@ func main() {
 		go poller.Run(ctx)
 	}
 
-	api := &httpapi.Server{Store: st, Engine: engine, Log: log, APIToken: os.Getenv("KORUGAN_API_TOKEN")}
+	api := &httpapi.Server{Store: st, Engine: engine, Actions: actionsvc, Log: log, APIToken: os.Getenv("KORUGAN_API_TOKEN")}
 	srv := &http.Server{Addr: cfg.Addr, Handler: api.Router(), ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
@@ -141,8 +157,29 @@ func buildEngine(st *store.Store, log interface{ Warn(string, ...any) }) *ai.Eng
 		log.Warn("llm provider init failed", "err", err)
 		return ai.NewEngine(nil, st)
 	}
-	a := ai.Assignment{Provider: p, Model: model}
-	return ai.NewEngine(map[ai.Tier]ai.Assignment{
+	a := ai.Assignment{
+		Provider:      p,
+		Model:         model,
+		PriceInPer1K:  envFloat("KORUGAN_LLM_PRICE_IN_PER_1K"),
+		PriceOutPer1K: envFloat("KORUGAN_LLM_PRICE_OUT_PER_1K"),
+	}
+	engine := ai.NewEngine(map[ai.Tier]ai.Assignment{
 		ai.TierFast: a, ai.TierBalanced: a, ai.TierDeep: a,
 	}, st)
+	if daily, monthly := envFloat("KORUGAN_LLM_BUDGET_DAILY_USD"), envFloat("KORUGAN_LLM_BUDGET_MONTHLY_USD"); daily > 0 || monthly > 0 {
+		engine.SetBudget(ai.Budget{DailyUSD: daily, MonthlyUSD: monthly}, st)
+	}
+	return engine
+}
+
+func envFloat(key string) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0
+	}
+	return f
 }

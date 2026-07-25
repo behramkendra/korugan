@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,73 @@ func TestFindingUpsertRefreshesOpen(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("upserted finding missing from list")
+	}
+}
+
+func TestRecommendationAndActionRoundTrip(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	ref := domain.ResourceRef{Provider: domain.ProviderCloudflare, Kind: "zone", ExternalID: NewID(), Name: "act.example.com"}
+	resID, err := s.UpsertResource(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findingID, err := s.UpsertOpenFinding(ctx, resID, domain.Finding{
+		Resource: ref, Kind: "blocked_traffic_spike", Severity: domain.SevHigh,
+		Title: "spike", Source: "rule",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recID, err := s.InsertRecommendation(ctx, domain.Recommendation{
+		FindingID: findingID, Resource: ref, ActionType: domain.ActWAFRuleCreate,
+		Params:    map[string]any{"expression": `(http.request.uri.path eq "/wp-login.php")`, "action": "managed_challenge"},
+		Rationale: "challenge login brute force", Rollback: "delete the created rule", Confidence: 0.8,
+	})
+	if err != nil {
+		t.Fatalf("insert recommendation: %v", err)
+	}
+
+	got, err := s.GetRecommendation(ctx, recID)
+	if err != nil || got == nil {
+		t.Fatalf("get recommendation: %v", err)
+	}
+	if got.ActionType != domain.ActWAFRuleCreate || got.Resource.ExternalID != ref.ExternalID {
+		t.Fatalf("recommendation round trip wrong: %+v", got)
+	}
+	if got.Params["action"] != "managed_challenge" {
+		t.Fatalf("params not preserved: %+v", got.Params)
+	}
+
+	a := domain.Action{
+		ID: NewID(), Type: domain.ActWAFRuleCreate, Resource: ref,
+		Params: got.Params, State: domain.ActionApproved, RecommendationID: recID,
+		ApprovedBy: "alice", IdempotencyKey: NewID(), AutonomyLevel: domain.L2,
+	}
+	if err := s.InsertAction(ctx, resID, a); err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if err := s.SetActionState(ctx, a.ID, domain.ActionApplied, map[string]any{"provider_ref": "rule_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetActionState(ctx, a.ID, domain.ActionVerified, nil); err != nil {
+		t.Fatal(err)
+	}
+	row, err := s.GetAction(ctx, a.ID)
+	if err != nil || row == nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if row.State != domain.ActionVerified {
+		t.Fatalf("state not advanced: %s", row.State)
+	}
+	// COALESCE must preserve the apply result through the nil-result verify update
+	if len(row.Result) == 0 || !strings.Contains(string(row.Result), "rule_1") {
+		t.Fatalf("apply result not preserved through verify: %s", row.Result)
+	}
+	if row.ApprovedBy == nil || *row.ApprovedBy != "alice" {
+		t.Fatalf("approver not stored: %+v", row.ApprovedBy)
 	}
 }
 
